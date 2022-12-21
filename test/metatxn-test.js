@@ -45,13 +45,16 @@ describe("MetaTokenTransfer", function () {
     );
     await approveTxn.wait(1);
 
+    let nonce = 1;
+
     // Have user sign message to transfer 10 tokens to recipient
     const transferAmountOfTokens = parseEther("10");
     const messageHash = await tokenSenderContract.getHash(
       userAddress.address,
       transferAmountOfTokens,
       recipientAddress.address,
-      randomTokenContract.address
+      randomTokenContract.address,
+      nonce
     );
 
     const signature = await userAddress.signMessage(arrayify(messageHash));
@@ -64,18 +67,123 @@ describe("MetaTokenTransfer", function () {
       transferAmountOfTokens,
       recipientAddress.address,
       randomTokenContract.address,
+      nonce,
       signature
     );
     await metaTxn.wait(1);
     // Check the user's balance decreased, and recipient got 10 tokens
-    const userBalance = await randomTokenContract.balanceOf(
-      userAddress.address
-    );
-    const recipientBalance = await randomTokenContract.balanceOf(
+    let userBalance = await randomTokenContract.balanceOf(userAddress.address);
+    let recipientBalance = await randomTokenContract.balanceOf(
       recipientAddress.address
     );
 
     expect(userBalance.lt(tenThousandTokensWithDecimal)).to.be.true;
     expect(recipientBalance.gt(BigNumber.from(0))).to.be.true;
+
+    // Increment the nonce
+    nonce++;
+
+    // Have the user sign a seconde message, with a diferent nonce, to transfer 10 more tokens
+    const messageHash2 = await tokenSenderContract.getHash(
+      userAddress.address,
+      transferAmountOfTokens,
+      recipientAddress.address,
+      randomTokenContract.address,
+      nonce
+    );
+    const signature2 = await userAddress.signMessage(arrayify(messageHash2));
+    // Have the relayer execute the transaction on behalf of the user
+    const metaTxn2 = await relayerSenderContractInstance.transfer(
+      userAddress.address,
+      transferAmountOfTokens,
+      recipientAddress.address,
+      randomTokenContract.address,
+      nonce,
+      signature2
+    );
+    await metaTxn.wait(1);
+    // Check the user's balance decreased, and recipient got 10 tokens
+    userBalance = await randomTokenContract.balanceOf(userAddress.address);
+    recipientBalance = await randomTokenContract.balanceOf(
+      recipientAddress.address
+    );
+
+    expect(userBalance.eq(parseEther("9980"))).to.be.true;
+    expect(recipientBalance.eq(parseEther("20"))).to.be.true;
+  });
+
+  it("Should not let the signature replay happen", async () => {
+    // Deploy the contracts
+    const RandomTokenFactory = await ethers.getContractFactory("RandomToken");
+    const randomTokenContract = await RandomTokenFactory.deploy();
+    await randomTokenContract.deployed();
+
+    const MetaTokenSenderFactory = await ethers.getContractFactory(
+      "TokenSender"
+    );
+    const tokenSenderContract = await MetaTokenSenderFactory.deploy();
+    await tokenSenderContract.deployed();
+
+    // Get three addresses, treat one as the user address
+    // one as the relayer address, and one as a recipient address
+    const [_, userAddress, relayerAddress, recipientAddress] =
+      await ethers.getSigners();
+
+    // Mint 10,000 tokens to user address (for testing)
+    const tenThousandTokensWithDecimals = parseEther("10000");
+    const userTokenContractInstance = randomTokenContract.connect(userAddress);
+    const mintTxn = await userTokenContractInstance.freeMint(
+      tenThousandTokensWithDecimals
+    );
+    await mintTxn.wait();
+
+    // Have user infinite approve the token sender contract for transferring 'RandomToken'
+    const approveTxn = await userTokenContractInstance.approve(
+      tokenSenderContract.address,
+      BigNumber.from(
+        // This is uint256's max value (2^256 - 1) in hex
+        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      )
+    );
+    await approveTxn.wait();
+
+    // Have user sign message to transfer 10 tokens to recipient
+    let nonce = 1;
+
+    const transferAmountOfTokens = parseEther("10");
+    const messageHash = await tokenSenderContract.getHash(
+      userAddress.address,
+      transferAmountOfTokens,
+      recipientAddress.address,
+      randomTokenContract.address,
+      nonce
+    );
+    const signature = await userAddress.signMessage(arrayify(messageHash));
+
+    // Have the relayer execute the transaction on behalf of the user
+    const relayerSenderContractInstance =
+      tokenSenderContract.connect(relayerAddress);
+    const metaTxn = await relayerSenderContractInstance.transfer(
+      userAddress.address,
+      transferAmountOfTokens,
+      recipientAddress.address,
+      randomTokenContract.address,
+      nonce,
+      signature
+    );
+    await metaTxn.wait();
+
+    // Have the relayer attempt to execute the same transaction again with the same signature
+    // This time, we expect the transaction to be reverted because the signature has already been used.
+    expect(
+      relayerSenderContractInstance.transfer(
+        userAddress.address,
+        transferAmountOfTokens,
+        recipientAddress,
+        randomTokenContract.address,
+        nonce,
+        signature
+      )
+    ).to.be.revertedWith("Already executed!");
   });
 });
